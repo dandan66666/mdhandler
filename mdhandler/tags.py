@@ -36,10 +36,10 @@ class Tag(object):
         return self.tree[index]
 
     def _start_tag(self):
-        if len(self.attrs) != 0:
-            self._array.append('<'+self.tag+' '+str(self.attrs))
+        if len(self.attrs) == 1 and len(self.attrs['style']) == 0:
+            self._array.append('<' + self.tag)
         else:
-            self._array.append('<'+self.tag)
+            self._array.append('<'+self.tag+' '+str(self.attrs))
         if self.single:
             self._array.append(' />')
         else:
@@ -89,7 +89,7 @@ class Tag(object):
 
 class List(Tag):
     def __init__(self):
-        super(List).__init__()
+        super(List, self).__init__()
         self.depth = 1
 
     def _handle_child_tag(self, tag):

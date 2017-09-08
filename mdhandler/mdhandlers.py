@@ -12,6 +12,7 @@ from abc import ABCMeta
 import re
 
 from .tags import *
+from .splitters import *
 from .taginfo import TagInfo
 
 class MdHandler(object):
@@ -47,28 +48,19 @@ class MdHandler(object):
                     self.line = deque(line)
                     self.handle_line()
 
-    def handle_title(self, line):
+    def handle_title(self):
         num = 0
-        while line[num] == '#':
+        while self.line[0] == '#':
             num += 1
+            self.line.popleft()
+        if self.line[0] == ' ':
+            self.line.popleft()
         title = Title(num)
-        title.append(line[num:-1])
         self.before[-1].append(title)
-        return None
-
-    def handle_list_before(self, line, ordered=False):
-        left = line[line.find('.'):].leftstrip() if ordered else line[1:].leftstrip()
-        if isinstance(self.before[-1], ListItem):
-            lt = OrderedList() if ordered else UnOrderedList()
-            li = ListItem()
-            lt.append(li)
-            self.before[-1].append(lt)
-            self.before.append(lt)
-            self.before.append(li)
-        return
+        self.before.append(title)
 
     def get_list_flags(self):
-        a = array('b')
+        a = []
         u = self.is_unordered_list_flag()
         o = self.is_ordered_list_flag()
         while u or o:
@@ -104,10 +96,10 @@ class MdHandler(object):
         self.before.append(li)
 
 
-    def handle_list(self, ordered=False):
+    def handle_list(self):
         a = self.get_list_flags()
-        bp = self.before[-1].parents
         if isinstance(self.before[-1], ListItem):
+            bp = self.before[-1].parents
             if a == bp:
                 li = ListItem(self.before[-1].parent, bp)
                 del a
@@ -118,24 +110,29 @@ class MdHandler(object):
                 for i in range(0, len(bp)-len(subs)):
                     self.pop_before_listitem_with_list()
                 for i in range(len(subs), len(a)):
-                    self.push_before_listitem_with_list(self.before[-1].parents+[a[i]], a[i])
+                    p = getattr(self.before[-1], 'parents', [])
+                    self.push_before_listitem_with_list(p+[a[i]], a[i])
+        else:
+            for index, item in enumerate(a):
+                self.push_before_listitem_with_list(a[:index+1], item)
 
-
-    def is_unordered_list_flag(self):
+    def is_unordered_list_flag(self, pop=True):
         if len(self.line) < 2:
             return False
         if self.line[0] in ['*', '+', '-'] and self.line[1] == ' ':
-            self.line.popleft()
-            self.line.popleft()  # pop space
+            if pop:
+                self.line.popleft()
+                self.line.popleft()  # pop space
             return True
         return False
 
-    def is_ordered_list_flag(self):
-        if re.search('\d+\. ', self.line) is not None:
-            temp = self.line.popleft()
-            while temp != '.':
+    def is_ordered_list_flag(self, pop=True):
+        if re.search('^\d+\. ', ''.join(self.line)) is not None:
+            if pop:
                 temp = self.line.popleft()
-            self.line.popleft()  # pop space
+                while temp != '.':
+                    temp = self.line.popleft()
+                self.line.popleft()  # pop space
             return True
         return False
 
@@ -160,6 +157,7 @@ class MdHandler(object):
         '''
         if len(match_flag) == 2, temp = match_flag[0]
         else temp = ''
+        match_flag can be '[', '![', '](', ')', '*', '_', '**', '__', '`'
         if match nothing, return None
         :return:
         '''
@@ -171,10 +169,12 @@ class MdHandler(object):
             pass
         elif len(self.line) > 1 and self.line[0] == '!' and self.line[1] == '[' or self.line[0] == ']' and self.line[1] == '(':
             temp = self.line.popleft()
+        elif self.line[0] == '\\':   # handle escape meaningful flag
+            self.line.popleft()
+            return None
         else:
             return None
         return temp+self.line.popleft()
-
 
     def handle_inline(self):
         '''
@@ -182,7 +182,7 @@ class MdHandler(object):
         em, strong, code, image, link does not work if change line
         :return:
         '''
-        self.pop_space()
+        self.pop_left_space()
         if self.line[-1] == '\n':
             self.line.pop()  # pop '\n'
         if self.line[0] == '>':  # handle code block
@@ -196,6 +196,7 @@ class MdHandler(object):
                 temp.append(self.line[0])
                 self.line.popleft()
                 continue
+
             if match_flag in TagInfo.ces_tags:  # handle em, strong and code flag
                 if match_flag in d:  # right flag
                     l = d[match_flag]
@@ -207,6 +208,7 @@ class MdHandler(object):
                 else:   # left flag
                     d[match_flag] = len(temp)
                     temp.append(match_flag)
+
             elif match_flag == ')':  # handle end of link or image
                 link_pos = d.get('[', -1)
                 img_pos = d.get('![', -1)
@@ -223,21 +225,23 @@ class MdHandler(object):
                     del d['[']
                 del d['](']
                 self.is_image_or_link(type, s, mid_pos, temp)
-            elif match_flag == '](':
+            elif match_flag == '](':  # handle middle of link or image
                 if '[' in d or '![' in d:
                     d[match_flag] = len(temp)
                 temp.append(match_flag)
-            else:
+            else:                    # handle begin of link or image
                 d[match_flag] = len(temp)
                 temp.append(match_flag)
+
+        # push inline tags into parent tag
         if len(temp) == 1:
             self.before[-1].append(temp.popleft())
         else:
-            lists = self.get_items_from_deque_right(temp, 0)
+            lists = self.get_items_from_deque_right(temp, 0, True)
             self.before[-1].extend(lists)
 
-    def get_items_from_deque_right(self, temp, pos):
-        pace = len(temp)-pos-1
+    def get_items_from_deque_right(self, temp, pos, without_start_tag=False):
+        pace = len(temp)-pos if without_start_tag else len(temp)-pos-1
         outs = deque()
         arr = array('c')
         while pace:
@@ -254,7 +258,8 @@ class MdHandler(object):
         if arr:
             arr.reverse()
             outs.appendleft(''.join(arr))
-        temp.pop()
+        if without_start_tag is False:
+            temp.pop()
         if len(outs) == 1:  # mean only have a string
             return outs[0]
         return outs
@@ -294,32 +299,35 @@ class MdHandler(object):
         while isinstance(self.before[-1], ListItem):
             self.before.pop()
 
-    def pop_space(self):
-        while self.line and self.line[0] in [' ', '\t', '\n']:
+    def handle_hr(self):
+        while not isinstance(self.before[-1], Body):
+            self.before.pop()
+        self.body.append(SplitLine())
+
+    def pop_left_space(self):
+        while self.line and self.line[0] in [' ', '\t']:
             self.line.popleft()
 
     def handle_line(self):
-        self.pop_space()
+        # handle special condition -- Code
+        if isinstance(self.before[-1], Code) and self.line[0] != '\n':
+            self.before[-1].append(''.join(self.line))
+            return
+
+        self.pop_left_space()
         if self.line is None:
             return
-        if self.line.startswith('#'):
-            return self.handle_title()
-        elif self.is_unordered_list_flag():
-            self.handle_list(False)
-        elif self.is_ordered_list_flag():
-            self.handle_list(True)
-        else:
-            self.handle_inline()
-        self.handle_line()
+        if self.line[0] == '#':
+            self.handle_title()
+        elif self.is_unordered_list_flag(False) or self.is_ordered_list_flag(False):
+            self.handle_list()
+        elif self.line in ['***', '___', '---']:
+            self.handle_hr()
+            return
 
+        self.handle_inline()
 
     def save_to_html(self):
         with open(self.outname, 'w') as fp:
             fp.write(str(self.html))
 
-    def add_new_symbols(self, ch):
-        last = self.before[-1]
-        if ch == last.flag or ch == '\n':
-            last.end()
-            self.before.pop()
-            self.before[-1].append(str(last))
